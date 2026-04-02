@@ -67,7 +67,7 @@ ZenStore AI is a RESTful backend service that accepts raw product data, enriches
 | **Task Queue** | Celery | Background AI & image processing tasks |
 | **Message Broker** | Redis | Celery broker + result backend |
 | **Cache** | Redis | LLM response caching, product cache |
-| **LLM** | Ollama (local) | Runs open models (llama3, mistral, gemma) locally via HTTP |
+| **LLM** | Ollama (Cloud) | Runs open models (llama3, mistral, gemma) locally via HTTP |
 | **Auth** | JWT (python-jose) + bcrypt | Authentication & authorization |
 | **API Docs** | Swagger UI (built into FastAPI) | Interactive API documentation |
 | **Validation** | Pydantic v2 | Request/response schemas |
@@ -332,7 +332,7 @@ Update BatchJob.status = done
 - [ ] Implement `config.py` with Pydantic BaseSettings
 - [ ] Set up async SQLAlchemy engine with `aiomysql` + session factory
 - [ ] Create all ORM models, use `create_all` on app startup (no Alembic)
-- [ ] Verify Ollama is running locally with chosen model (`ollama pull llama3`)
+- [ ] Verify Ollama is running on cloud with chosen model 
 - [ ] Implement `BaseRepository` with generic async CRUD
 
 ### Phase 2 — Authentication (Day 3)
