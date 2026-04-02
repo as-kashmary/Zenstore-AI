@@ -4,7 +4,7 @@
 
 ## 1. Overview
 
-ZenStore AI is a RESTful backend service that accepts raw product data, enriches it with LLM-generated marketing descriptions, and processes bulk uploads asynchronously. It is built on FastAPI with async SQLAlchemy, secured with JWT authentication, and documented with Swagger (OpenAPI).
+ZenStore AI is a RESTful backend service that accepts raw product data, enriches it with LLM-generated marketing descriptions, and processes bulk uploads asynchronously. It is built on FastAPI with async SQLAlchemy, backed by MySQL, powered by a locally-running Ollama LLM, secured with JWT authentication, and documented with Swagger (OpenAPI).
 
 ---
 
@@ -48,9 +48,9 @@ ZenStore AI is a RESTful backend service that accepts raw product data, enriches
           ┌──────────────┴──────────────┐
           │                             │
 ┌─────────▼──────────┐       ┌──────────▼──────────┐
-│   PostgreSQL DB    │       │   External LLM API   │
-│  (Primary Store)   │       │  (Groq / Gemini /    │
-│                    │       │   OpenAI)            │
+│     MySQL DB       │       │   Ollama (Local)     │
+│  (Primary Store)   │       │  localhost:11434     │
+│  aiomysql driver   │       │  e.g. llama3/mistral │
 └────────────────────┘       └─────────────────────┘
 ```
 
@@ -61,16 +61,17 @@ ZenStore AI is a RESTful backend service that accepts raw product data, enriches
 | Layer | Technology | Purpose |
 |---|---|---|
 | **Web Framework** | FastAPI | Async REST API, automatic OpenAPI/Swagger |
-| **ORM** | SQLAlchemy 2.x (async) | Async database access with `asyncpg` |
-| **Database** | PostgreSQL | Primary persistent store |
+| **ORM** | SQLAlchemy 2.x (async) | Async database access with `aiomysql` |
+| **Database** | MySQL | Primary persistent store |
+| **DB Driver** | aiomysql | Async MySQL driver for SQLAlchemy |
 | **Task Queue** | Celery | Background AI & image processing tasks |
 | **Message Broker** | Redis | Celery broker + result backend |
 | **Cache** | Redis | LLM response caching, product cache |
-| **LLM API** | Groq (recommended) / Gemini / OpenAI | AI description generation |
+| **LLM** | Ollama (local) | Runs open models (llama3, mistral, gemma) locally via HTTP |
 | **Auth** | JWT (python-jose) + bcrypt | Authentication & authorization |
 | **API Docs** | Swagger UI (built into FastAPI) | Interactive API documentation |
 | **Validation** | Pydantic v2 | Request/response schemas |
-| **Migrations** | Alembic | Database schema versioning |
+| **DB Init** | SQLAlchemy `create_all` | Auto-creates tables from models on startup (no Alembic) |
 | **File Parsing** | Python Generators + csv/json stdlib | Memory-efficient batch file reading |
 | **Config** | Pydantic BaseSettings + `.env` | Environment-based configuration |
 | **Testing** | pytest + pytest-asyncio + httpx | Async-compatible test suite |
@@ -83,15 +84,11 @@ ZenStore AI is a RESTful backend service that accepts raw product data, enriches
 ```
 zenstore-ai/
 │
-├── docker-compose.yml               # PostgreSQL + Redis + App + Celery worker
+├── docker-compose.yml               # MySQL + Redis + App + Celery worker
 ├── Dockerfile
 ├── .env.example
-├── alembic.ini
 ├── requirements.txt
 ├── README.md
-│
-├── alembic/
-│   └── versions/                    # Migration files
 │
 ├── app/
 │   ├── main.py                      # FastAPI app factory, router registration
@@ -114,7 +111,7 @@ zenstore-ai/
 │   │
 │   ├── db/
 │   │   ├── __init__.py
-│   │   ├── base.py                  # SQLAlchemy async engine & session factory
+│   │   ├── base.py                  # SQLAlchemy async engine (aiomysql) + session factory + create_all
 │   │   └── base_class.py            # Declarative base class
 │   │
 │   ├── models/                      # SQLAlchemy ORM models
@@ -140,7 +137,7 @@ zenstore-ai/
 │   │   ├── __init__.py
 │   │   ├── auth_service.py
 │   │   ├── product_service.py
-│   │   ├── llm_service.py           # LLM API calls + caching
+│   │   ├── llm_service.py           # Ollama HTTP calls + Redis caching
 │   │   └── batch_service.py         # Generator-based file parser
 │   │
 │   ├── tasks/                       # Celery task definitions
@@ -163,6 +160,8 @@ zenstore-ai/
 ---
 
 ## 5. Database Schema
+
+> **MySQL note:** MySQL has no native UUID column type. All `id` and `owner_id` fields use `VARCHAR(36)` and UUIDs are generated in Python (`uuid.uuid4()`) before insert. SQLAlchemy handles this transparently.
 
 ### `users`
 | Column | Type | Notes |
@@ -258,7 +257,7 @@ def parse_csv_rows(filepath: str):
 ```
 
 ### 7.4 Caching Layer — Redis
-`LLMService` checks Redis before calling the external LLM API. Cache key is derived from a hash of the product name. TTL is configurable (default: 24 hours). Product list responses are also cached per user.
+`LLMService` checks Redis before calling Ollama. Cache key is derived from a hash of the product name. TTL is configurable (default: 24 hours). This avoids re-running the model for duplicate product names. Product list responses are also cached per user.
 
 ### 7.5 Background Tasks — Celery + Redis
 - `POST /products/` returns immediately with `status: pending` and a product ID.
@@ -288,7 +287,7 @@ ProductService.create_product()
       ▼ (async, in Celery worker)
 ai_tasks.generate_ai_description(product_id)
   → Check Redis cache (by product name hash)
-  → If miss: Call LLM API → store result in Redis
+  → If miss: POST to Ollama (localhost:11434/api/generate) → store result in Redis
   → Update product record: description, category, status=done
   → Dispatch image_tasks.simulate_image_processing(product_id)
 ```
@@ -321,7 +320,7 @@ Update BatchJob.status = done
 - All routes (except `/auth/register` and `/auth/login`) protected by `Depends(get_current_user)`
 - All DB queries scoped to `current_user.id` — no cross-user data leakage
 - Input validated by Pydantic before any DB or LLM interaction
-- LLM API keys stored in `.env`, never exposed in responses
+- Ollama runs locally — no external API keys required or exposed
 
 ---
 
@@ -329,10 +328,11 @@ Update BatchJob.status = done
 
 ### Phase 1 — Foundation (Days 1–2)
 - [ ] Set up project structure, virtual environment, `requirements.txt`
-- [ ] Configure Docker Compose (PostgreSQL + Redis)
+- [ ] Configure Docker Compose (MySQL + Redis)
 - [ ] Implement `config.py` with Pydantic BaseSettings
-- [ ] Set up async SQLAlchemy engine + session factory
-- [ ] Create all ORM models + Alembic migrations
+- [ ] Set up async SQLAlchemy engine with `aiomysql` + session factory
+- [ ] Create all ORM models, use `create_all` on app startup (no Alembic)
+- [ ] Verify Ollama is running locally with chosen model (`ollama pull llama3`)
 - [ ] Implement `BaseRepository` with generic async CRUD
 
 ### Phase 2 — Authentication (Day 3)
@@ -351,9 +351,9 @@ Update BatchJob.status = done
 
 ### Phase 4 — LLM & Caching (Day 6)
 - [ ] Build `LLMService` with Redis cache check-before-call logic
-- [ ] Integrate Groq/Gemini/OpenAI API
+- [ ] Integrate Ollama via HTTP (`POST localhost:11434/api/generate`)
 - [ ] Prompt engineer the 2-sentence description + category output
-- [ ] Unit test LLM service with mocked API responses
+- [ ] Unit test LLM service with mocked Ollama responses
 
 ### Phase 5 — Background Tasks (Day 7)
 - [ ] Set up `celery_app.py` with Redis broker
@@ -387,17 +387,15 @@ SECRET_KEY=your-super-secret-key
 ACCESS_TOKEN_EXPIRE_MINUTES=30
 REFRESH_TOKEN_EXPIRE_DAYS=7
 
-# Database
-DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/zenstore
+# Database (MySQL)
+DATABASE_URL=mysql+aiomysql://user:password@localhost:3306/zenstore
 
 # Redis
 REDIS_URL=redis://localhost:6379/0
 
-# LLM
-LLM_PROVIDER=groq         # groq | openai | gemini
-GROQ_API_KEY=your-groq-api-key
-OPENAI_API_KEY=your-openai-api-key
-GEMINI_API_KEY=your-gemini-api-key
+# Ollama (local)
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3               # or mistral, gemma, etc.
 
 # Cache
 LLM_CACHE_TTL_SECONDS=86400
@@ -405,4 +403,4 @@ LLM_CACHE_TTL_SECONDS=86400
 
 ---
 
-*Architecture version 1.0 — ZenStore AI*
+*Architecture version 1.1 — ZenStore AI (MySQL + Ollama, no Alembic)*
